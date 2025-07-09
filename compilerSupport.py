@@ -77,6 +77,68 @@ def parse_cfg_to_dot(cfg_text):
     dot_lines.append("}")
     return "\n".join(dot_lines)
 
+def extract_cfgs_per_function(cfg_text):
+    functions = {}
+    current_func = None
+    current_lines = []
+
+    for line in cfg_text.splitlines():
+        if line.startswith(";; Function "):
+            if current_func and current_lines:
+                functions[current_func] = "\n".join(current_lines)
+            current_func = re.findall(r";; Function (\w+)", line)[0]
+            current_lines = []
+        elif current_func is not None:
+            current_lines.append(line)
+
+    if current_func and current_lines:
+        functions[current_func] = "\n".join(current_lines)
+
+    return functions
+
+from PyQt5.QtWidgets import QTabWidget
+
+class TabbedCFGWindow(QDialog):
+    def __init__(self, per_func_cfgs, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Function-wise Control Flow Graphs")
+        self.resize(1000, 800)
+
+        layout = QVBoxLayout()
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs)
+        self.setLayout(layout)
+
+        for func_name, cfg_text in per_func_cfgs.items():
+            dot = parse_cfg_to_dot(cfg_text)
+            tab = self.create_webview_tab(dot)
+            self.tabs.addTab(tab, func_name)
+
+    def create_webview_tab(self, dot_source):
+        view = QWebEngineView()
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".dot") as dot_file:
+                dot_file.write(dot_source.encode('utf-8'))
+                dot_path = dot_file.name
+
+            svg_path = dot_path + ".svg"
+            subprocess.run(["dot", "-Tsvg", dot_path, "-o", svg_path], check=True)
+
+            file_url = QUrl.fromLocalFile(svg_path)
+            view.load(file_url)
+
+            # Cleanup SVG file when view is destroyed
+            def cleanup():
+                if os.path.exists(svg_path):
+                    os.remove(svg_path)
+            view.destroyed.connect(cleanup)
+
+        except Exception as e:
+            view.setHtml(f"<h3>Error rendering CFG:</h3><pre>{e}</pre>")
+
+        return view
+
+
 class GimpleDiffViewer(QDialog):
     def __init__(self, file_a, file_b, parent=None):
         super().__init__(parent)
@@ -163,11 +225,11 @@ class CFGWindow(QDialog):
 
     def render_svg(self, dot_source):
         try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".dot") as dot_file:
+            with tempfile.NamedTemporaryFile(dir=self.parent().temp_path, delete=False, suffix=".dot") as dot_file:
                 dot_file.write(dot_source.encode('utf-8'))
                 dot_path = dot_file.name
 
-            svg_path = dot_path + ".svg"
+            svg_path = os.path.join(self.parent().temp_path, os.path.basename(dot_path) + ".svg")
             subprocess.run(["dot", "-Tsvg", dot_path, "-o", svg_path], check=True)
 
             # Load the SVG into the web view
@@ -335,11 +397,113 @@ class RtlDiffViewer(QDialog):
         html += "</pre>"
         self.text_view.setHtml(html)
 
+def generate_pass_diffs(passes):
+    diffs = []
+    for i in range(len(passes) - 1):
+        _, name1, file1 = passes[i]
+        _, name2, file2 = passes[i + 1]
+        with open(file1) as f1, open(file2) as f2:
+            lines1 = f1.readlines()
+            lines2 = f2.readlines()
+        diff = list(difflib.unified_diff(lines1, lines2, lineterm=""))
+        diffs.append(((name1, name2), diff))
+    return diffs
+
+class GimplePassDiffTimeline(QDialog):
+    def __init__(self, pass_diffs, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("GIMPLE Pass Diff Timeline")
+        self.resize(1000, 600)
+
+        self.sidebar = QListWidget()
+        self.text_view = QTextEdit()
+        self.text_view.setReadOnly(True)
+        self.text_view.setFont(QFont("Courier", 10))
+
+        for (name1, name2), _ in pass_diffs:
+            self.sidebar.addItem(f"{name1} → {name2}")
+
+        self.pass_diffs = dict(((name1, name2), diff) for (name1, name2), diff in pass_diffs)
+        self.sidebar.currentRowChanged.connect(self.display_diff)
+
+        splitter = QSplitter()
+        splitter.addWidget(self.sidebar)
+        splitter.addWidget(self.text_view)
+
+        layout = QVBoxLayout()
+        layout.addWidget(splitter)
+        self.setLayout(layout)
+
+        self.sidebar.setCurrentRow(0)
+
+    def display_diff(self, index):
+        item_text = self.sidebar.item(index).text()
+        name1, name2 = item_text.split(" → ")
+        diff = self.pass_diffs.get((name1, name2), [])
+        html = "<pre>" + "\n".join(
+            f'<span style="color:green;">{l}</span>' if l.startswith('+') and not l.startswith('+++') else
+            f'<span style="color:red;">{l}</span>' if l.startswith('-') and not l.startswith('---') else
+            l for l in diff
+        ) + "</pre>"
+        self.text_view.setHtml(html)
+
+def generate_rtl_pass_diffs(passes):
+    diffs = []
+    for i in range(len(passes) - 1):
+        _, name1, file1 = passes[i]
+        _, name2, file2 = passes[i + 1]
+        with open(file1) as f1, open(file2) as f2:
+            lines1 = f1.readlines()
+            lines2 = f2.readlines()
+        diff = list(difflib.unified_diff(lines1, lines2, lineterm=""))
+        diffs.append(((name1, name2), diff))
+    return diffs
+
+class RtlPassDiffTimeline(QDialog):
+    def __init__(self, pass_diffs, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("RTL Pass Diff Timeline")
+        self.resize(1000, 600)
+
+        self.sidebar = QListWidget()
+        self.text_view = QTextEdit()
+        self.text_view.setReadOnly(True)
+        self.text_view.setFont(QFont("Courier", 10))
+
+        for (name1, name2), _ in pass_diffs:
+            self.sidebar.addItem(f"{name1} → {name2}")
+
+        self.pass_diffs = dict(((name1, name2), diff) for (name1, name2), diff in pass_diffs)
+        self.sidebar.currentRowChanged.connect(self.display_diff)
+
+        splitter = QSplitter()
+        splitter.addWidget(self.sidebar)
+        splitter.addWidget(self.text_view)
+
+        layout = QVBoxLayout()
+        layout.addWidget(splitter)
+        self.setLayout(layout)
+
+        self.sidebar.setCurrentRow(0)
+
+    def display_diff(self, index):
+        item_text = self.sidebar.item(index).text()
+        name1, name2 = item_text.split(" → ")
+        diff = self.pass_diffs.get((name1, name2), [])
+        html = "<pre>" + "\n".join(
+            f'<span style="color:green;">{l}</span>' if l.startswith('+') and not l.startswith('+++') else
+            f'<span style="color:red;">{l}</span>' if l.startswith('-') and not l.startswith('---') else
+            l for l in diff
+        ) + "</pre>"
+        self.text_view.setHtml(html)
+
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.temp_path = self.temp_dir.name
         self.setWindowTitle("C File Viewer & Editor")
         self.setGeometry(100, 100, 800, 600)
 
@@ -349,6 +513,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.text_edit)
 
         self.highlighter = CSyntaxHighlighter(self.text_edit.document())
+        self.optimization_level = "-O2"  # default optimization level
 
         self.create_menu()
 
@@ -380,6 +545,28 @@ class MainWindow(QMainWindow):
         build_cfg_action.setShortcut("Ctrl+Shift+B")
         build_cfg_action.triggered.connect(self.build_with_cfg)
         build_menu.addAction(build_cfg_action)
+
+                # Optimization Level menu
+        opt_menu = menubar.addMenu("Optimization Level")
+
+        self.opt_group = {}
+
+        def set_opt_level(opt):
+            def setter():
+                self.optimization_level = opt
+                for level, action in self.opt_group.items():
+                    action.setChecked(level == opt)
+            return setter
+
+        for level in ["-O0", "-O1", "-O2", "-O3", "-Og", "-Os", "-Ofast"]:
+            action = QAction(level, self, checkable=True)
+            if level == self.optimization_level:
+                action.setChecked(True)
+            action.triggered.connect(set_opt_level(level))
+            opt_menu.addAction(action)
+            self.opt_group[level] = action
+
+
         optimizations_menu = build_menu.addMenu("Build and Show Optimizations")
 
         gimple_action = QAction("Machine Independent (GIMPLE)", self)
@@ -402,7 +589,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Error", f"Could not save before build:\n{e}")
             return
 
-        cmd = ['gcc', self.current_file, '-o', 'a.out']
+        cmd = ['gcc', self.current_file, self.optimization_level, '-o', os.path.join(self.temp_path, 'a.out')]
 
         try:
             process = subprocess.run(
@@ -431,7 +618,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Error", f"Could not save before build:\n{e}")
             return
 
-        cmd = ['gcc', self.current_file, '-fdump-tree-cfg', '-o', 'a.out']
+        cmd = ['gcc', self.current_file, self.optimization_level, '-fdump-tree-cfg', '-o', os.path.join(self.temp_path, 'a.out')]
 
         try:
             process = subprocess.run(
@@ -448,7 +635,7 @@ class MainWindow(QMainWindow):
 
                 
                 base = os.path.basename(self.current_file)
-                pattern = os.path.join(os.getcwd(), f"a-{base}.*.cfg")
+                pattern = os.path.join(self.temp_path, f"a-{base}.*.cfg")
                 files = glob.glob(pattern)
                 if not files:
                     QMessageBox.warning(self, "Warning", "No CFG dump file found.")
@@ -459,9 +646,18 @@ class MainWindow(QMainWindow):
                 with open(cfg_file, 'r') as f:
                     cfg_text = f.read()
 
-                dot_source = parse_cfg_to_dot(cfg_text)
-                cfg_window = CFGWindow(dot_source, parent=self)
-                cfg_window.exec_()
+                # dot_source = parse_cfg_to_dot(cfg_text)
+                # cfg_window = CFGWindow(dot_source, parent=self)
+                # cfg_window.exec_()
+
+                per_func_cfgs = extract_cfgs_per_function(cfg_text)
+                if not per_func_cfgs:
+                    QMessageBox.warning(self, "No CFGs", "Could not extract any functions.")
+                    return
+
+                cfg_tabbed_window = TabbedCFGWindow(per_func_cfgs, parent=self)
+                cfg_tabbed_window.exec_()
+
 
                 for fpath in files:
                     try:
@@ -523,7 +719,7 @@ class MainWindow(QMainWindow):
             return
 
         base = os.path.splitext(os.path.basename(self.current_file))[0]
-        cmd = ["gcc", self.current_file, "-O2"]  # Enable optimizations
+        cmd = ["gcc", self.current_file, self.optimization_level ]  # Enable optimizations
 
         # Append dump flags
         if mode == "gimple":
@@ -537,10 +733,10 @@ class MainWindow(QMainWindow):
 
 
         try:
-            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            subprocess.run(cmd,cwd=self.temp_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
             # Pattern to find dump files
-            pattern = os.path.join(os.getcwd(), f"a-{base}.c.{dump_ext}")
+            pattern = os.path.join(self.temp_path, f"a-{base}.c.{dump_ext}")
             print(f"Looking for dump files with pattern: {pattern}")
             dump_files = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
 
@@ -549,46 +745,84 @@ class MainWindow(QMainWindow):
                 return
 
             # Let user pick a dump file to view
+            # if mode == "gimple":
+            #     if len(dump_files) < 2:
+            #         QMessageBox.warning(self, "Not Enough Dumps", "Need at least 2 GIMPLE dump files.")
+            #         return
+
+            #     file_a, ok1 = QFileDialog.getOpenFileName(self, "Select First GIMPLE Pass", self.temp_path, "GIMPLE (*t.*)")
+            #     if not ok1: return
+            #     file_b, ok2 = QFileDialog.getOpenFileName(self, "Select Second GIMPLE Pass", self.temp_path, "GIMPLE (*t.*)")
+            #     if not ok2: return
+
+            #     viewer = GimpleDiffViewer(file_a, file_b, parent=self)
+            #     viewer.exec_()
             if mode == "gimple":
-                if len(dump_files) < 2:
+                passes = self.get_ordered_gimple_passes(base)
+                if len(passes) < 2:
                     QMessageBox.warning(self, "Not Enough Dumps", "Need at least 2 GIMPLE dump files.")
                     return
 
-                file_a, ok1 = QFileDialog.getOpenFileName(self, "Select First GIMPLE Pass", os.getcwd(), "GIMPLE (*t.*)")
-                if not ok1: return
-                file_b, ok2 = QFileDialog.getOpenFileName(self, "Select Second GIMPLE Pass", os.getcwd(), "GIMPLE (*t.*)")
-                if not ok2: return
-
-                viewer = GimpleDiffViewer(file_a, file_b, parent=self)
+                diffs = generate_pass_diffs(passes)
+                viewer = GimplePassDiffTimeline(diffs, self)
                 viewer.exec_()
 
-            if mode == "rtl":
-                if len(dump_files) < 2:
-                    QMessageBox.warning(self, "Need 2 RTL dumps", "Run -fdump-rtl-all and select two files.")
+
+            # if mode == "rtl":
+            #     if len(dump_files) < 2:
+            #         QMessageBox.warning(self, "Need 2 RTL dumps", "Run -fdump-rtl-all and select two files.")
+            #         return
+            #     f1, ok1 = QFileDialog.getOpenFileName(
+            #         self, "Select First RTL Pass", os.getcwd(), "RTL Dumps (*r.*)"
+            #     )
+            #     if not ok1 or not f1: return
+
+            #     f2, ok2 = QFileDialog.getOpenFileName(
+            #         self, "Select Second RTL Pass", os.getcwd(), "RTL Dumps (*r.*)"
+            #     )
+            #     if not ok2 or not f2: return
+
+            #     viewer = RtlDiffViewer(f1, f2, self)
+            #     viewer.exec_()
+            if mode == "rtl":    
+                passes = self.get_ordered_rtl_passes(base)
+                if len(passes) < 2:
+                    QMessageBox.warning(self, "Not Enough RTL Dumps", "Need at least 2 RTL dump files.")
                     return
-                f1, ok1 = QFileDialog.getOpenFileName(
-                    self, "Select First RTL Pass", os.getcwd(), "RTL Dumps (*r.*)"
-                )
-                if not ok1 or not f1: return
 
-                f2, ok2 = QFileDialog.getOpenFileName(
-                    self, "Select Second RTL Pass", os.getcwd(), "RTL Dumps (*r.*)"
-                )
-                if not ok2 or not f2: return
-
-                viewer = RtlDiffViewer(f1, f2, self)
+                diffs = generate_rtl_pass_diffs(passes)
+                viewer = RtlPassDiffTimeline(diffs, self)
                 viewer.exec_()
-
-            for fpath in dump_files:
-                try:
-                    os.remove(fpath)
-                except Exception as e:
-                    print(f"Warning: Could not remove dump file {fpath}: {e}")
 
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to run gcc with {mode.upper()} optimizations:\n{e}")
+    def get_ordered_rtl_passes(self, base_filename):
+        pattern = os.path.join(self.temp_path, f"a-{base_filename}.c.*r.*")
+        dump_files = glob.glob(pattern)
 
+        def extract_info(f):
+            match = re.search(r"\.(\d+)r\.(.+)$", f)
+            if match:
+                return int(match.group(1)), match.group(2), f
+            return -1, "", f
+
+        passes = sorted([extract_info(f) for f in dump_files], key=lambda x: x[0])
+        return passes
+
+    
+    def get_ordered_gimple_passes(self, base_filename):
+        pattern = os.path.join(self.temp_path, f"a-{base_filename}.c.*t.*")
+        dump_files = glob.glob(pattern)
+
+        def extract_info(f):
+            match = re.search(r"\.(\d+)t\.(.+)$", f)
+            if match:
+                return int(match.group(1)), match.group(2), f
+            return -1, "", f  # fallback
+
+        passes = sorted([extract_info(f) for f in dump_files], key=lambda x: x[0])
+        return passes
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
