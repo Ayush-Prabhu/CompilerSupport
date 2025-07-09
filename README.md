@@ -35,7 +35,7 @@ sudo apt install graphviz gcc     # On Debian/Ubuntu
 ## How to Use
 
 ```bash
-python main.py
+python compilerSupport.py
 ```
 
 ### Menu Overview
