@@ -2,13 +2,13 @@ import sys
 import re
 import subprocess
 from PyQt5.QtWidgets import (
-   QApplication, QMainWindow, QAction, QFileDialog, QTextEdit, QMessageBox, QLabel, QListWidget, QSplitter, QGraphicsView, QGraphicsScene
+   QApplication, QMainWindow, QAction, QFileDialog, 
+   QTextEdit, QMessageBox, QLabel, QListWidget, 
+   QSplitter, QGraphicsView, QGraphicsScene, QDialog, QVBoxLayout
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView
-#from PyQt5.QtSvg import QGraphicsSvgItem
 from PyQt5.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor, QFont, QPixmap
 from PyQt5.QtCore import Qt, QUrl
-from PyQt5.QtWidgets import QDialog, QVBoxLayout
 import os, glob, tempfile, difflib
 
 def parse_cfg_to_dot(cfg_text):
@@ -737,7 +737,7 @@ class MainWindow(QMainWindow):
 
             # Pattern to find dump files
             pattern = os.path.join(self.temp_path, f"a-{base}.c.{dump_ext}")
-            print(f"Looking for dump files with pattern: {pattern}")
+            # print(f"Looking for dump files with pattern: {pattern}")
             dump_files = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
 
             if not dump_files:
